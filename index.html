@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>冰箱管家 AI Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        @media print {
+            body * { visibility: hidden; }
+            #label-to-print, #label-to-print * { visibility: visible; }
+            #label-to-print { position: absolute; left: 0; top: 0; width: 60mm; height: 40mm; border: 2px solid #000; padding: 15px; }
+            .no-print { display: none; }
+        }
+        .loading-spinner { border: 3px solid #f3f3f3; border-top: 3px solid #6366f1; border-radius: 50%; width: 16px; height: 16px; animation: spin 1s linear infinite; display: inline-block; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen font-sans text-slate-900">
+    <div class="max-w-md mx-auto p-4">
+        <header class="flex justify-between items-center py-6 no-print">
+            <div>
+                <h1 class="text-2xl font-black text-indigo-600 tracking-tighter">FRIDGE MASTER</h1>
+                <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">AI-Powered Kitchen</p>
+            </div>
+            <button onclick="recommendRecipes()" class="bg-amber-100 text-amber-700 px-3 py-2 rounded-xl text-xs font-black shadow-sm active:scale-95 transition">💡 灵感</button>
+        </header>
+
+        <div id="recipeSection" class="hidden mb-6 p-5 bg-indigo-600 rounded-3xl text-white shadow-xl no-print">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="font-black italic">今日推荐菜谱</h3>
+                <button onclick="this.parentElement.parentElement.classList.add('hidden')" class="text-indigo-200 text-xl">×</button>
+            </div>
+            <div id="recipeContent" class="space-y-4"></div>
+        </div>
+
+        <div class="bg-white rounded-3xl shadow-xl shadow-slate-200/50 p-6 mb-6 no-print border border-slate-100">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-[10px] font-black text-slate-400 mb-1 uppercase">食材名称</label>
+                    <input type="text" id="foodName" placeholder="例如：番茄" class="w-full border-none bg-slate-50 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none">
+                </div>
+                <div class="flex items-end gap-2">
+                    <div class="flex-1">
+                        <label class="block text-[10px] font-black text-slate-400 mb-1 uppercase">保质期至</label>
+                        <input type="date" id="expiryDate" class="w-full border-none bg-slate-50 rounded-xl p-3 focus:ring-2 focus:ring-indigo-500 outline-none">
+                    </div>
+                    <input type="file" id="cameraInput" accept="image/*" capture="camera" class="hidden" onchange="handleOcr(event)">
+                    <button id="ocrBtn" onclick="document.getElementById('cameraInput').click()" class="bg-slate-100 text-slate-600 p-3 rounded-xl hover:bg-indigo-100 hover:text-indigo-600 transition min-w-[54px]">
+                        <span id="ocrIcon">📷</span>
+                    </button>
+                </div>
+                <button onclick="handleSave()" class="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition">存入冰箱并打印</button>
+            </div>
+        </div>
+
+        <div id="label-to-print" class="hidden bg-white border-2 border-indigo-100 p-6 rounded-2xl mb-6 text-center shadow-inner">
+            <div id="previewContent"></div>
+            <button onclick="window.print()" class="mt-4 px-6 py-2 bg-slate-800 text-white text-[10px] rounded-full font-black no-print">立即打印标签</button>
+        </div>
+
+        <div class="no-print">
+            <div class="flex justify-between items-center mb-4 px-1">
+                <h2 class="text-xs font-black text-slate-400 uppercase tracking-widest">当前库存</h2>
+                <span id="itemCount" class="text-[10px] bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-bold">0</span>
+            </div>
+            <div id="foodList" class="space-y-3"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. 数据库配置 ---
+        let db;
+        const dbReq = indexedDB.open("FridgeMasterPro", 1);
+        dbReq.onupgradeneeded = e => e.target.result.createObjectStore("items", { keyPath: "id", autoIncrement: true });
+        dbReq.onsuccess = e => { db = e.target.result; renderList(); };
+
+        // --- 2. 菜谱库 ---
+        const RECIPES = [
+            { name: "西红柿炒鸡蛋", ings: ["番茄", "西红柿", "鸡蛋"], step: "最强下饭菜，鸡蛋先炒熟盛出，再炒番茄出汁。" },
+            { name: "青椒炒肉片", ings: ["青椒", "猪肉", "肉"], step: "肉片加淀粉抓匀更嫩，大火快炒青椒。" },
+            { name: "香煎牛排", ings: ["牛排", "牛肉"], step: "大火两面各煎2分钟，记得加蒜瓣和迷迭香。" },
+            { name: "酸辣土豆丝", ings: ["土豆"], step: "土豆丝洗掉淀粉，加干辣椒和醋爆炒。" },
+            { name: "蒜蓉西兰花", ings: ["西兰花"], step: "西兰花先焯水，多放蒜蓉炒出香味。" }
+        ];
+
+        // --- 3. 核心功能 ---
+        async function handleOcr(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const icon = document.getElementById('ocrIcon');
+            icon.innerHTML = '<div class="loading-spinner"></div>';
+            try {
+                const worker = await Tesseract.createWorker('eng');
+                const { data: { text } } = await worker.recognize(file);
+                await worker.terminate();
+                const match = text.match(/(\d{4})[./-]\s?(\d{1,2})[./-]\s?(\d{1,2})/);
+                if (match) document.getElementById('expiryDate').value = `${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}`;
+                else alert("未识别到日期，请重试或手动输入");
+            } catch (err) { alert("识别出错"); }
+            icon.innerHTML = '📷';
+        }
+
+        function handleSave() {
+            const name = document.getElementById('foodName').value;
+            const date = document.getElementById('expiryDate').value;
+            if (!name || !date) return alert("请填写内容");
+            const tx = db.transaction("items", "readwrite");
+            tx.objectStore("items").add({ name, date });
+            tx.oncomplete = () => {
+                showLabel(name, date);
+                renderList();
+                document.getElementById('foodName').value = '';
+            };
+        }
+
+        function recommendRecipes() {
+            const tx = db.transaction("items", "readonly");
+            tx.objectStore("items").getAll().onsuccess = e => {
+                const inv = e.target.result;
+                const names = inv.map(i => i.name).join("");
+                const hits = RECIPES.filter(r => r.ings.some(ing => names.includes(ing)));
+                
+                const section = document.getElementById('recipeSection');
+                const content = document.getElementById('recipeContent');
+                section.classList.remove('hidden');
+                
+                if (hits.length === 0) {
+                    content.innerHTML = "<p class='text-sm opacity-80'>冰箱里的食材太有个性，目前没匹配到固定菜谱，试试大乱炖？</p>";
+                } else {
+                    content.innerHTML = hits.map(r => `
+                        <div class='bg-white/10 p-3 rounded-xl border border-white/20'>
+                            <div class='font-bold text-amber-300'>${r.name}</div>
+                            <div class='text-[10px] opacity-80 mt-1'>${r.step}</div>
+                        </div>
+                    `).join('');
+                }
+            };
+        }
+
+        function showLabel(name, date) {
+            document.getElementById('label-to-print').classList.remove('hidden');
+            document.getElementById('previewContent').innerHTML = `
+                <div class="text-2xl font-black mb-1">${name}</div>
+                <div class="text-[10px] text-slate-400 uppercase tracking-widest">保质期至 / Expiry</div>
+                <div class="text-xl font-mono font-bold text-indigo-600 mt-1">${date}</div>
+            `;
+        }
+
+        function renderList() {
+            const tx = db.transaction("items", "readonly");
+            tx.objectStore("items").getAll().onsuccess = e => {
+                const items = e.target.result.sort((a,b) => new Date(a.date) - new Date(b.date));
+                document.getElementById('itemCount').innerText = items.length;
+                document.getElementById('foodList').innerHTML = items.map(item => {
+                    const diff = Math.ceil((new Date(item.date) - new Date()) / 86400000);
+                    const color = diff <= 0 ? 'bg-red-100 text-red-600' : diff <= 3 ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600';
+                    return `
+                        <div class="bg-white p-4 rounded-2xl flex justify-between items-center shadow-sm border border-slate-100">
+                            <div><div class="font-bold text-slate-700 text-sm">${item.name}</div><div class="text-[10px] text-slate-400">${item.date}</div></div>
+                            <div class="flex items-center gap-3">
+                                <span class="text-[10px] px-2 py-1 rounded-lg font-black ${color}">${diff <= 0 ? '已过期' : '余 '+diff+' 天'}</span>
+                                <button onclick="deleteItem(${item.id})" class="text-slate-200 hover:text-red-500 transition">✕</button>
+                            </div>
+                        </div>`;
+                }).join('');
+            };
+        }
+
+        function deleteItem(id) { db.transaction("items", "readwrite").objectStore("items").delete(id).oncomplete = renderList; }
+    </script>
+</body>
+</html>
